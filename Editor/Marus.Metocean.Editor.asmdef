@@ -1,0 +1,20 @@
+{
+    "name": "Marus.Metocean.Editor",
+    "rootNamespace": "Marus.Metocean.Editor",
+    "references": [
+        "Marus.Metocean",
+        "GUID:c47c588af94a289439184f626352a939"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
+

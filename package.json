@@ -1,0 +1,16 @@
+{
+  "name": "com.marus2.metocean",
+  "version": "1.0.0",
+  "displayName": "MARUS2 Metocean",
+  "description": "Meteorological and oceanographic (metocean) state management, provider architecture, and consumer adapters for MARUS2.",
+  "unity": "6000.5",
+  "unityRelease": "11f1",
+  "dependencies": {
+    "com.marus2.core": "1.0.0"
+  },
+  "author": {
+    "name": "LABUST",
+    "url": "http://labust.fer.hr/"
+  }
+}
+

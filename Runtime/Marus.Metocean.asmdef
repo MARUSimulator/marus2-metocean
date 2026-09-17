@@ -1,0 +1,23 @@
+{
+    "name": "Marus.Metocean",
+    "rootNamespace": "Marus.Metocean",
+    "references": [
+        "GUID:c47c588af94a289439184f626352a939"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.waveharmonics.crest",
+            "expression": "",
+            "define": "CREST_OCEAN"
+        }
+    ],
+    "noEngineReferences": false
+}
+
