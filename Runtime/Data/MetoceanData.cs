@@ -40,7 +40,16 @@ namespace Marus.Metocean
         {
             Ocean = ocean;
             Weather = weather;
-            this.timestampUtc = (timestamp ?? DateTime.UtcNow).ToString("o");
+            DateTime ts = timestamp ?? DateTime.UtcNow;
+            if (ts.Kind == DateTimeKind.Local)
+            {
+                ts = ts.ToUniversalTime();
+            }
+            else if (ts.Kind == DateTimeKind.Unspecified)
+            {
+                ts = DateTime.SpecifyKind(ts, DateTimeKind.Utc);
+            }
+            this.timestampUtc = ts.ToString("o");
             this.location = location ?? new GeoPoint(0.0, 0.0, 0.0);
         }
 
@@ -48,13 +57,18 @@ namespace Marus.Metocean
         {
             get
             {
-                if (DateTime.TryParse(timestampUtc, out var dt))
+                if (DateTime.TryParse(timestampUtc, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal | System.Globalization.DateTimeStyles.AssumeUniversal, out var dt))
                 {
                     return dt;
                 }
                 return DateTime.UtcNow;
             }
-            set => timestampUtc = value.ToString("o");
+            set
+            {
+                DateTime ts = value.Kind == DateTimeKind.Local ? value.ToUniversalTime() :
+                              value.Kind == DateTimeKind.Unspecified ? DateTime.SpecifyKind(value, DateTimeKind.Utc) : value;
+                timestampUtc = ts.ToString("o");
+            }
         }
 
         public static MetoceanData Default => new MetoceanData(

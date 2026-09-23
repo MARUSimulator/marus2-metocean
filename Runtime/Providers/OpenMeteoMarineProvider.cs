@@ -124,7 +124,7 @@ namespace Marus.Metocean
             ocean.current = currentData;
 
             DateTime timestamp = DateTime.UtcNow;
-            if (DateTime.TryParse(response.current.time, out var parsedTime))
+            if (DateTime.TryParse(response.current.time, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsedTime))
             {
                 timestamp = parsedTime;
             }
