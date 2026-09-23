@@ -61,13 +61,31 @@ The `EnvironmentWeatherAdapter` bridges Metocean atmospheric conditions into Uni
   * `Custom Month` (slider `1`–`12`): Scrub to observe seasonal sun elevation changes.
   * `Custom Day` (slider `1`–`31`): Scrub to observe real-time lunar orbit motion and phase progression.
 
-### 4. Setting Up Sun and Moon in Unity HDRP
+### 4. HDRP Volumetric Clouds Synchronization & Wind Drift
+* **Decoupled HDRP Integration**:
+  * Seamlessly controls Unity HDRP's `VolumetricClouds` and `VisualEnvironment` via reflection (preserving zero hard compile-time dependencies on the HDRP package in `Marus.Metocean`).
+  * Automatically detects the scene's `Sky and Fog Global Volume` (or accepts a manual volume assignment).
+* **Automatic Cloud Presets**:
+  * **`Clear`** ($< 5\%$ coverage): Disables volumetric clouds and sets `VisualEnvironment.cloudType = None`, rendering a crystal-clear blue sky with unobstructed views of the Sun, Moon, and stars.
+  * **`Sparse`** ($5\% - 35\%$ coverage): Sets HDRP preset to `Sparse` (scattered cumulus formations).
+  * **`Cloudy`** ($35\% - 70\%$ coverage): Sets HDRP preset to `Cloudy`.
+  * **`Overcast`** ($\ge 70\%$ coverage): Sets HDRP preset to `Overcast`.
+  * **`Stormy`** (rain intensity $\ge 0.35$ or heavy storms): Sets HDRP preset to `Stormy`.
+* **Wind-Driven Cloud Drift**:
+  * Clouds naturally drift across the sky dome driven by the Metocean wind speed and blow-to direction vector, factoring in `TrueNorthOffset`.
+  * Smoothly shifts the HDRP `cloudOffset` UV coordinates with configurable speed multiplier.
+* **Live Weather Station Cloud Estimation**:
+  * `WeatherDisplayClientRawProvider` translates real-time observation descriptions (e.g. `Clear`, `Sunny`, `Partly Cloudy`, `Overcast`, `Rain/Storm`) into continuous cloud coverage values.
+
+### 5. Setting Up Sun, Moon, and Clouds in Unity HDRP
 1. **Sun Light**: Assign an existing Directional Light to `Sun Light` on `EnvironmentWeatherAdapter`.
 2. **Moon Light**:
    - In the Unity menu, select **`GameObject` → `Light` → `Directional Moon Light`**.
    - Drag this light into the **`Moon Light`** field (or leave it named `Directional Moon Light` for auto-detection).
    - In the Moon's `HDAdditionalLightData` component, under **Celestial Body**, assign the built-in HDRP texture `MoonAlbedo` to **Surface Texture**.
-3. Point your camera towards the Southern sky to view the Moon disc at night.
+3. **Clouds**:
+   - Ensure your scene's Global Volume Profile includes `VolumetricClouds` and `VisualEnvironment`.
+   - `EnvironmentWeatherAdapter` automatically finds the volume and syncs cloud coverage and wind drift.
 
 ---
 

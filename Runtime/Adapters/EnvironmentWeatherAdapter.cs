@@ -13,6 +13,8 @@
 // limitations under the License.
 
 using System;
+using System.Collections;
+using System.Reflection;
 using Marus.Core;
 using UnityEngine;
 
@@ -59,6 +61,19 @@ namespace Marus.Metocean
         [SerializeField] private bool _syncWindZone = true;
         [SerializeField] private WindZone _windZone;
         [SerializeField] private float _windZoneSpeedMultiplier = 1.0f;
+
+        [Header("Clouds (HDRP Volumetric Clouds)")]
+        [Tooltip("Sync cloud coverage and presets (Clear, Sparse, Cloudy, Overcast, Stormy) with HDRP Volumetric Clouds.")]
+        [SerializeField] private bool _syncClouds = true;
+
+        [Tooltip("HDRP Volume GameObject or Component hosting the Sky/Global Volume with VolumetricClouds. If unassigned, automatically finds it in the scene.")]
+        [SerializeField] private UnityEngine.Object _cloudVolume;
+
+        [Tooltip("Animate cloud drift across the sky driven by Metocean wind speed and direction.")]
+        [SerializeField] private bool _windDrivenCloudDrift = true;
+
+        [Tooltip("Speed multiplier for wind-driven cloud drift.")]
+        [SerializeField] private float _cloudWindSpeedMultiplier = 0.0005f;
 
         [Header("Time & Date Settings")]
         [Tooltip("Source of time used for calculating celestial positions.")]
@@ -130,6 +145,8 @@ namespace Marus.Metocean
         private float _moonPhaseProgress;
         private float _moonIlluminationFraction;
         private string _calculatedSolarTime = string.Empty;
+        private Vector2 _accumulatedCloudOffset;
+        private string _activeCloudPresetName = "None";
 
         private MetoceanData _lastData = MetoceanData.Default;
 
@@ -141,16 +158,26 @@ namespace Marus.Metocean
         public float MoonIlluminationFraction => _moonIlluminationFraction;
         public string MoonPhaseName => GetMoonPhaseName(_moonPhaseProgress);
         public string CalculatedSolarTime => _calculatedSolarTime;
+        public string ActiveCloudPresetName => _activeCloudPresetName;
+        public Vector2 CloudOffset => _accumulatedCloudOffset;
 
         protected override void Update()
         {
             base.Update();
             UpdateCelestialBodies();
+            if (_syncClouds && _windDrivenCloudDrift && Application.isPlaying)
+            {
+                UpdateCloudDrift();
+            }
         }
 
         private void OnValidate()
         {
             UpdateCelestialBodies();
+            if (_syncClouds)
+            {
+                UpdateClouds(_lastData.Weather);
+            }
         }
 
         private void Reset()
@@ -212,6 +239,12 @@ namespace Marus.Metocean
 
             // 4. Sun & Moon (Celestial Bodies)
             UpdateCelestialBodies();
+
+            // 5. Clouds (HDRP Volumetric Clouds)
+            if (_syncClouds)
+            {
+                UpdateClouds(weather);
+            }
         }
 
         private void UpdateCelestialBodies()
@@ -663,5 +696,342 @@ namespace Marus.Metocean
             if (p <= 0.78f) return "Last Quarter";
             return "Waning Crescent";
         }
+
+        #region HDRP Volumetric Clouds Synchronization
+
+        private object _cachedVolumetricClouds;
+        private object _cachedVisualEnvironment;
+        private UnityEngine.Object _cachedProfile;
+
+        private object ResolveVolumeProfile()
+        {
+            if (_cloudVolume != null)
+            {
+                if (_cloudVolume is GameObject go)
+                {
+                    var vol = go.GetComponent("Volume");
+                    if (vol != null) return GetProfileFromVolume(vol);
+                }
+                else if (_cloudVolume is Component comp)
+                {
+                    if (comp.GetType().Name == "Volume") return GetProfileFromVolume(comp);
+                    var vol = comp.GetComponent("Volume");
+                    if (vol != null) return GetProfileFromVolume(vol);
+                }
+                else if (_cloudVolume.GetType().Name.Contains("VolumeProfile"))
+                {
+                    return _cloudVolume;
+                }
+            }
+
+            // Auto-detect Volume in scene
+            var skyGo = GameObject.Find("Sky and Fog Global Volume") ?? GameObject.Find("Global Volume") ?? GameObject.Find("Sky Volume");
+            if (skyGo != null)
+            {
+                var vol = skyGo.GetComponent("Volume");
+                if (vol != null) return GetProfileFromVolume(vol);
+            }
+
+            // Fallback: search active scene roots for any Volume component
+            var scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            if (scene.isLoaded)
+            {
+                var roots = scene.GetRootGameObjects();
+                foreach (var root in roots)
+                {
+                    var comps = root.GetComponentsInChildren<Component>(true);
+                    foreach (var c in comps)
+                    {
+                        if (c != null && c.GetType().Name == "Volume")
+                        {
+                            return GetProfileFromVolume(c);
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static object GetProfileFromVolume(object volumeComp)
+        {
+            if (volumeComp == null) return null;
+            var type = volumeComp.GetType();
+            if (Application.isPlaying)
+            {
+                var prof = type.GetProperty("profile")?.GetValue(volumeComp);
+                if (prof != null) return prof;
+            }
+            return type.GetProperty("sharedProfile")?.GetValue(volumeComp);
+        }
+
+        private void ResolveComponents(object profile)
+        {
+            if (profile == null) return;
+            _cachedProfile = profile as UnityEngine.Object;
+            _cachedVolumetricClouds = null;
+            _cachedVisualEnvironment = null;
+
+            IEnumerable list = null;
+            var prop = profile.GetType().GetProperty("components");
+            if (prop != null) list = prop.GetValue(profile) as IEnumerable;
+            if (list == null)
+            {
+                var field = profile.GetType().GetField("components");
+                if (field != null) list = field.GetValue(profile) as IEnumerable;
+            }
+
+            if (list != null)
+            {
+                foreach (var item in list)
+                {
+                    if (item == null) continue;
+                    string typeName = item.GetType().Name;
+                    if (typeName == "VolumetricClouds")
+                    {
+                        _cachedVolumetricClouds = item;
+                    }
+                    else if (typeName == "VisualEnvironment")
+                    {
+                        _cachedVisualEnvironment = item;
+                    }
+                }
+            }
+
+            if (_cachedVolumetricClouds != null && _accumulatedCloudOffset == Vector2.zero)
+            {
+                _accumulatedCloudOffset = GetVolumeVector2Parameter(_cachedVolumetricClouds, "cloudOffset");
+            }
+        }
+
+        private void UpdateClouds(WeatherStateData weather)
+        {
+            if (!_syncClouds) return;
+
+            if (_cachedVolumetricClouds == null || _cachedVisualEnvironment == null)
+            {
+                var prof = ResolveVolumeProfile();
+                ResolveComponents(prof);
+            }
+
+            if (_cachedVolumetricClouds == null) return;
+
+            float coverage = weather.cloudCoverage;
+            float rain = weather.rainIntensity;
+
+            if (coverage < 0.05f)
+            {
+                _activeCloudPresetName = "Clear";
+
+                // Turn off clouds for clear sky
+                SetVolumeParameterValue(_cachedVolumetricClouds, "enable", false);
+                if (_cachedVisualEnvironment != null)
+                {
+                    SetVolumeParameterValue(_cachedVisualEnvironment, "cloudType", 0);
+                }
+            }
+            else
+            {
+                // Enable clouds
+                SetVolumeParameterValue(_cachedVolumetricClouds, "enable", true);
+                if (_cachedVisualEnvironment != null)
+                {
+                    SetVolumeParameterValue(_cachedVisualEnvironment, "cloudType", 1);
+                }
+
+                // Ensure cloudControl is Simple (0)
+                SetVolumeParameterValue(_cachedVolumetricClouds, "cloudControl", 0);
+
+                int targetPreset;
+                if (rain >= 0.35f)
+                {
+                    targetPreset = 3; // Stormy
+                    _activeCloudPresetName = "Stormy";
+                }
+                else if (coverage >= 0.70f)
+                {
+                    targetPreset = 2; // Overcast
+                    _activeCloudPresetName = "Overcast";
+                }
+                else if (coverage >= 0.35f)
+                {
+                    targetPreset = 1; // Cloudy
+                    _activeCloudPresetName = "Cloudy";
+                }
+                else
+                {
+                    targetPreset = 0; // Sparse
+                    _activeCloudPresetName = "Sparse";
+                }
+
+                // Apply preset via property
+                var cloudType = _cachedVolumetricClouds.GetType();
+                var presetProp = cloudType.GetProperty("cloudPreset", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (presetProp != null && presetProp.CanWrite)
+                {
+                    var enumVal = presetProp.PropertyType.IsEnum ? Enum.ToObject(presetProp.PropertyType, targetPreset) : (object)targetPreset;
+                    presetProp.SetValue(_cachedVolumetricClouds, enumVal);
+                }
+                else
+                {
+                    SetVolumeParameterValue(_cachedVolumetricClouds, "m_CloudPreset", targetPreset);
+                    SetVolumeParameterValue(_cachedVolumetricClouds, "cloudPreset", targetPreset);
+                }
+
+                // Call ApplyCurrentCloudPreset if present on HDRP component
+                var applyMethod = cloudType.GetMethod("ApplyCurrentCloudPreset", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+                               ?? cloudType.GetMethod("SetCurrentPreset", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (applyMethod != null)
+                {
+                    var pars = applyMethod.GetParameters();
+                    if (pars.Length == 0) applyMethod.Invoke(_cachedVolumetricClouds, null);
+                    else if (pars.Length == 1) applyMethod.Invoke(_cachedVolumetricClouds, new object[] { Enum.ToObject(pars[0].ParameterType, targetPreset) });
+                }
+
+                // Apply accumulated offset
+                SetVolumeParameterValue(_cachedVolumetricClouds, "cloudOffset", _accumulatedCloudOffset);
+            }
+
+#if UNITY_EDITOR
+            if (!Application.isPlaying && _cachedProfile != null)
+            {
+                UnityEditor.EditorUtility.SetDirty(_cachedProfile);
+            }
+#endif
+        }
+
+        private void UpdateCloudDrift()
+        {
+            if (_cachedVolumetricClouds == null)
+            {
+                var prof = ResolveVolumeProfile();
+                ResolveComponents(prof);
+            }
+            if (_cachedVolumetricClouds == null) return;
+
+            float speed = _lastData.Weather.wind.speed;
+            if (speed <= 0.001f) return;
+
+            float blowToAngle = _lastData.Weather.wind.BlowToDirectionDegrees;
+            float northOffset = GeoOrigin.HasInstance ? GeoOrigin.Instance.TrueNorthOffset : 0f;
+            float totalAngle = blowToAngle + northOffset;
+
+            float rad = totalAngle * Mathf.Deg2Rad;
+            Vector2 driftDir = new Vector2(Mathf.Sin(rad), Mathf.Cos(rad));
+
+            // Subtract offset to advance texture coordinates in the direction the wind is blowing towards
+            _accumulatedCloudOffset -= driftDir * (speed * _cloudWindSpeedMultiplier * Time.deltaTime);
+
+            if (_accumulatedCloudOffset.x > 1000f) _accumulatedCloudOffset.x -= 2000f;
+            if (_accumulatedCloudOffset.x < -1000f) _accumulatedCloudOffset.x += 2000f;
+            if (_accumulatedCloudOffset.y > 1000f) _accumulatedCloudOffset.y -= 2000f;
+            if (_accumulatedCloudOffset.y < -1000f) _accumulatedCloudOffset.y += 2000f;
+
+            SetVolumeParameterValue(_cachedVolumetricClouds, "cloudOffset", _accumulatedCloudOffset);
+        }
+
+        private static void SetVolumeParameterValue(object volumeComponent, string memberName, object value, bool overrideState = true)
+        {
+            if (volumeComponent == null) return;
+            var type = volumeComponent.GetType();
+
+            // Direct property (e.g. cloudPreset)
+            var prop = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (prop != null && prop.CanWrite && prop.PropertyType.IsAssignableFrom(value.GetType()))
+            {
+                prop.SetValue(volumeComponent, value);
+                return;
+            }
+
+            // VolumeParameter field or property
+            object paramObj = null;
+            var field = type.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field != null)
+            {
+                paramObj = field.GetValue(volumeComponent);
+            }
+            else if (prop != null)
+            {
+                paramObj = prop.GetValue(volumeComponent);
+            }
+
+            if (paramObj == null) return;
+
+            var paramType = paramObj.GetType();
+
+            // Set overrideState
+            var overrideProp = paramType.GetProperty("overrideState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (overrideProp != null && overrideProp.CanWrite)
+            {
+                overrideProp.SetValue(paramObj, overrideState);
+            }
+            else
+            {
+                var overrideField = paramType.GetField("m_OverrideState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (overrideField != null) overrideField.SetValue(paramObj, overrideState);
+            }
+
+            // Set value
+            var valProp = paramType.GetProperty("value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (valProp != null && valProp.CanWrite)
+            {
+                if (valProp.PropertyType.IsAssignableFrom(value.GetType()))
+                {
+                    valProp.SetValue(paramObj, value);
+                }
+                else if (valProp.PropertyType.IsEnum && value is int intVal)
+                {
+                    valProp.SetValue(paramObj, Enum.ToObject(valProp.PropertyType, intVal));
+                }
+                else
+                {
+                    valProp.SetValue(paramObj, Convert.ChangeType(value, valProp.PropertyType));
+                }
+            }
+            else
+            {
+                var valField = paramType.GetField("m_Value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (valField != null)
+                {
+                    if (valField.FieldType.IsAssignableFrom(value.GetType()))
+                    {
+                        valField.SetValue(paramObj, value);
+                    }
+                    else if (valField.FieldType.IsEnum && value is int intVal)
+                    {
+                        valField.SetValue(paramObj, Enum.ToObject(valField.FieldType, intVal));
+                    }
+                    else
+                    {
+                        valField.SetValue(paramObj, Convert.ChangeType(value, valField.FieldType));
+                    }
+                }
+            }
+        }
+
+        private static Vector2 GetVolumeVector2Parameter(object volumeComponent, string memberName)
+        {
+            if (volumeComponent == null) return Vector2.zero;
+            var type = volumeComponent.GetType();
+            object paramObj = null;
+            var field = type.GetField(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field != null) paramObj = field.GetValue(volumeComponent);
+            else
+            {
+                var prop = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                if (prop != null) paramObj = prop.GetValue(volumeComponent);
+            }
+            if (paramObj == null) return Vector2.zero;
+
+            var valProp = paramObj.GetType().GetProperty("value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            if (valProp != null)
+            {
+                var v = valProp.GetValue(paramObj);
+                if (v is Vector2 v2) return v2;
+            }
+            return Vector2.zero;
+        }
+
+        #endregion
     }
 }

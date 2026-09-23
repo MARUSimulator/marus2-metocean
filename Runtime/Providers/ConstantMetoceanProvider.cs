@@ -28,6 +28,16 @@ namespace Marus.Metocean
         HeavyRain
     }
 
+    public enum CloudCondition
+    {
+        Custom,
+        Clear,
+        Sparse,
+        Cloudy,
+        Overcast,
+        Stormy
+    }
+
     /// <summary>
     /// Manual/Constant provider that exposes configurable metocean values in the Unity Inspector.
     /// Provides built-in presets and real-time tweaking during editor and play modes.
@@ -64,8 +74,13 @@ namespace Marus.Metocean
         [Range(0f, 1f)]
         [SerializeField] private float _fogDensity = 0.0f;
         [SerializeField] private float _visibility = 10000.0f;
+
+        [Tooltip("Standard cloud condition preset (Clear, Sparse, Cloudy, Overcast, Stormy, Custom).")]
+        [SerializeField] private CloudCondition _cloudCondition = CloudCondition.Sparse;
+
         [Range(0f, 1f)]
-        [SerializeField] private float _cloudCoverage = 0.3f;
+        [Tooltip("Fractional cloud coverage (0 = clear sky, 1 = completely overcast).")]
+        [SerializeField] private float _cloudCoverage = 0.25f;
 
         public override string ProviderName => "Constant / Manual Provider";
 
@@ -86,6 +101,10 @@ namespace Marus.Metocean
             {
                 ApplyPresetData(_preset);
             }
+            else
+            {
+                ApplyCloudCondition(_cloudCondition);
+            }
             ApplyCurrentValues();
         }
 
@@ -99,6 +118,32 @@ namespace Marus.Metocean
             ApplyCurrentValues();
         }
 
+        private void ApplyCloudCondition(CloudCondition condition)
+        {
+            switch (condition)
+            {
+                case CloudCondition.Clear:
+                    _cloudCoverage = 0.0f;
+                    break;
+                case CloudCondition.Sparse:
+                    _cloudCoverage = 0.2f;
+                    break;
+                case CloudCondition.Cloudy:
+                    _cloudCoverage = 0.5f;
+                    break;
+                case CloudCondition.Overcast:
+                    _cloudCoverage = 0.85f;
+                    break;
+                case CloudCondition.Stormy:
+                    _cloudCoverage = 0.95f;
+                    _rainIntensity = Mathf.Max(_rainIntensity, 0.5f);
+                    break;
+                case CloudCondition.Custom:
+                default:
+                    break;
+            }
+        }
+
         private void ApplyPresetData(MetoceanPreset preset)
         {
             switch (preset)
@@ -110,7 +155,8 @@ namespace Marus.Metocean
                     _rainIntensity = 0.0f;
                     _fogDensity = 0.0f;
                     _visibility = 15000f;
-                    _cloudCoverage = 0.05f;
+                    _cloudCondition = CloudCondition.Clear;
+                    _cloudCoverage = 0.0f;
                     break;
 
                 case MetoceanPreset.ModerateBreeze:
@@ -120,7 +166,8 @@ namespace Marus.Metocean
                     _rainIntensity = 0.0f;
                     _fogDensity = 0.0f;
                     _visibility = 10000f;
-                    _cloudCoverage = 0.4f;
+                    _cloudCondition = CloudCondition.Sparse;
+                    _cloudCoverage = 0.25f;
                     break;
 
                 case MetoceanPreset.RoughSea:
@@ -130,7 +177,8 @@ namespace Marus.Metocean
                     _rainIntensity = 0.2f;
                     _fogDensity = 0.05f;
                     _visibility = 6000f;
-                    _cloudCoverage = 0.85f;
+                    _cloudCondition = CloudCondition.Cloudy;
+                    _cloudCoverage = 0.6f;
                     break;
 
                 case MetoceanPreset.Stormy:
@@ -140,7 +188,8 @@ namespace Marus.Metocean
                     _rainIntensity = 0.85f;
                     _fogDensity = 0.2f;
                     _visibility = 2000f;
-                    _cloudCoverage = 1.0f;
+                    _cloudCondition = CloudCondition.Stormy;
+                    _cloudCoverage = 0.95f;
                     _seaLevelOffset = 0.5f;
                     break;
 
@@ -151,6 +200,7 @@ namespace Marus.Metocean
                     _rainIntensity = 0.05f;
                     _fogDensity = 0.85f;
                     _visibility = 200f;
+                    _cloudCondition = CloudCondition.Overcast;
                     _cloudCoverage = 0.9f;
                     break;
 
@@ -161,6 +211,7 @@ namespace Marus.Metocean
                     _rainIntensity = 0.95f;
                     _fogDensity = 0.4f;
                     _visibility = 1500f;
+                    _cloudCondition = CloudCondition.Stormy;
                     _cloudCoverage = 1.0f;
                     break;
 

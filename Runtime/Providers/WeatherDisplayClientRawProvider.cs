@@ -246,7 +246,9 @@ namespace Marus.Metocean
                 weatherConditionText = conditionText
             };
 
-            // Construct new weather state, preserving fog, visibility, and cloudiness from current cache
+            // Construct new weather state, preserving fog and visibility from current cache, and estimating cloud coverage from station text
+            float cloudCoverage = !string.IsNullOrWhiteSpace(conditionText) ? EstimateCloudCoverage(conditionText) : _currentData.Weather.cloudCoverage;
+
             var weather = new WeatherStateData(
                 airTemperature: tempC,
                 atmosphericPressure: barometer,
@@ -254,12 +256,25 @@ namespace Marus.Metocean
                 rainIntensity: rainIntensity,
                 fogDensity: _currentData.Weather.fogDensity,
                 visibility: _currentData.Weather.visibility,
-                cloudCoverage: _currentData.Weather.cloudCoverage,
+                cloudCoverage: cloudCoverage,
                 wind: wind
             );
 
             data = new MetoceanData(_currentData.Ocean, weather, DateTime.UtcNow);
             return true;
+        }
+
+        private static float EstimateCloudCoverage(string condition)
+        {
+            if (string.IsNullOrWhiteSpace(condition)) return 0.25f;
+            string lower = condition.ToLowerInvariant();
+            if (lower.Contains("clear") || lower.Contains("sunny") || lower.Contains("fine")) return 0.0f;
+            if (lower.Contains("few") || lower.Contains("sparse") || lower.Contains("scattered")) return 0.2f;
+            if (lower.Contains("partly")) return 0.45f;
+            if (lower.Contains("cloudy") || lower.Contains("broken")) return 0.65f;
+            if (lower.Contains("overcast") || lower.Contains("fog") || lower.Contains("mist")) return 0.85f;
+            if (lower.Contains("rain") || lower.Contains("storm") || lower.Contains("shower")) return 0.95f;
+            return 0.3f;
         }
 
         private static float ParseFloat(string value)
