@@ -169,8 +169,9 @@ namespace Marus.Metocean
             EnsureProviderAssigned();
         }
 
-        private void OnEnable()
+        protected override void OnEnable()
         {
+            base.OnEnable();
             EnsureProviderAssigned();
             if (_activeProvider != null && !ReferenceEquals(_currentSubscribedProvider, _activeProvider))
             {

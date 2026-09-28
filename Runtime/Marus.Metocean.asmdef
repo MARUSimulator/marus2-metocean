@@ -11,13 +11,6 @@
     "precompiledReferences": [],
     "autoReferenced": true,
     "defineConstraints": [],
-    "versionDefines": [
-        {
-            "name": "com.waveharmonics.crest",
-            "expression": "",
-            "define": "CREST_OCEAN"
-        }
-    ],
+    "versionDefines": [],
     "noEngineReferences": false
 }
-

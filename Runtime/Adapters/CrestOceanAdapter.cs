@@ -16,15 +16,12 @@ using System;
 using System.Reflection;
 using UnityEngine;
 
-#if CREST_OCEAN
-using Crest;
-#endif
-
 namespace Marus.Metocean
 {
     /// <summary>
     /// Adapter that retrieves wave data, ocean current data, and sea level from Metocean
-    /// and applies them to the Crest Ocean rendering and simulation system.
+    /// and applies them to the Crest Ocean rendering and simulation system dynamically via reflection.
+    /// Does not require a compile-time dependency on Crest assembly definition.
     /// </summary>
     [AddComponentMenu("MARUS/Metocean/Crest Ocean Adapter")]
     public class CrestOceanAdapter : MetoceanAdapterBase
@@ -58,6 +55,46 @@ namespace Marus.Metocean
         public bool CrestFound => _crestFound;
         public string IntegrationStatus => _integrationStatus;
 
+        private static Type _oceanRendererType;
+        private static PropertyInfo _instanceProp;
+        private static Type _shapeGerstnerType;
+        private static FieldInfo _weightField;
+        private static bool _typesResolved;
+
+        private static void ResolveCrestTypes()
+        {
+            if (_typesResolved) return;
+            _typesResolved = true;
+
+            _oceanRendererType = Type.GetType("Crest.OceanRenderer, Crest") ??
+                                 Type.GetType("Crest.OceanRenderer, Crest.HDRP") ??
+                                 FindTypeInAssemblies("Crest.OceanRenderer");
+
+            if (_oceanRendererType != null)
+            {
+                _instanceProp = _oceanRendererType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
+            }
+
+            _shapeGerstnerType = Type.GetType("Crest.ShapeGerstnerBatched, Crest") ??
+                                 Type.GetType("Crest.ShapeGerstnerBatched, Crest.HDRP") ??
+                                 FindTypeInAssemblies("Crest.ShapeGerstnerBatched");
+
+            if (_shapeGerstnerType != null)
+            {
+                _weightField = _shapeGerstnerType.GetField("_weight", BindingFlags.Public | BindingFlags.Instance);
+            }
+        }
+
+        private static Type FindTypeInAssemblies(string typeName)
+        {
+            foreach (var asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var t = asm.GetType(typeName);
+                if (t != null) return t;
+            }
+            return null;
+        }
+
         protected override void Start()
         {
             base.Start();
@@ -66,36 +103,22 @@ namespace Marus.Metocean
 
         private void CheckCrestAvailability()
         {
-#if CREST_OCEAN
-#if UNITY_6000_0_OR_NEWER
-            var oceanRenderer = FindAnyObjectByType<OceanRenderer>();
-#else
-            var oceanRenderer = FindObjectOfType<OceanRenderer>();
-#endif
-            _crestFound = oceanRenderer != null;
-            _integrationStatus = _crestFound ? "Crest OceanRenderer Connected" : "No OceanRenderer found in scene";
-#else
-            // Check via reflection if Crest exists in assembly without compile-time define
-            var crestType = Type.GetType("Crest.OceanRenderer, Crest") ??
-                            Type.GetType("Crest.OceanRenderer, Crest.HDRP");
-            if (crestType != null)
-            {
-#if UNITY_6000_0_OR_NEWER
-                var found = FindAnyObjectByType(crestType);
-#else
-                var found = FindObjectOfType(crestType);
-#endif
-                _crestFound = found != null;
-                _integrationStatus = _crestFound
-                    ? "Crest detected (Define CREST_OCEAN for direct bindings)"
-                    : "Crest library loaded, but no OceanRenderer in scene";
-            }
-            else
+            ResolveCrestTypes();
+
+            if (_oceanRendererType == null)
             {
                 _crestFound = false;
-                _integrationStatus = "Crest not present (Define CREST_OCEAN when Crest is installed)";
+                _integrationStatus = "Crest not present";
+                return;
             }
+
+#if UNITY_6000_0_OR_NEWER
+            var found = FindAnyObjectByType(_oceanRendererType);
+#else
+            var found = FindObjectOfType(_oceanRendererType);
 #endif
+            _crestFound = found != null;
+            _integrationStatus = _crestFound ? "Crest OceanRenderer Connected" : "Crest library loaded, but no OceanRenderer in scene";
         }
 
         public override void OnMetoceanUpdated(MetoceanData data)
@@ -105,33 +128,45 @@ namespace Marus.Metocean
 
         private void ApplyToCrest(OceanStateData ocean)
         {
-#if CREST_OCEAN
-            if (OceanRenderer.Instance == null)
+            ResolveCrestTypes();
+            if (_oceanRendererType == null || _instanceProp == null)
+            {
+                _crestFound = false;
+                return;
+            }
+
+            var instance = _instanceProp.GetValue(null) as Component;
+            if (instance == null)
             {
                 _crestFound = false;
                 return;
             }
             _crestFound = true;
 
-            // 1. Sea level / tide
+            // 1. Sea level / tide (in Crest, sea level corresponds to OceanRenderer transform position y)
             if (_syncSeaLevel)
             {
-                OceanRenderer.Instance.SeaLevel = _baseSeaLevel + ocean.seaLevelOffset;
+                var pos = instance.transform.position;
+                pos.y = _baseSeaLevel + ocean.seaLevelOffset;
+                instance.transform.position = pos;
             }
 
             // 2. Wave direction and height
-            var shapeGerstner = OceanRenderer.Instance.GetComponentInChildren<ShapeGerstnerBatched>();
-            if (shapeGerstner != null)
+            if (_shapeGerstnerType != null)
             {
-                if (_syncWaveDirection)
+                var shape = instance.GetComponentInChildren(_shapeGerstnerType);
+                if (shape != null)
                 {
-                    // Rotate wave generator towards wave propagation direction
-                    shapeGerstner.transform.rotation = Quaternion.Euler(0f, ocean.waves.TravelToDirectionDegrees, 0f);
-                }
+                    if (_syncWaveDirection)
+                    {
+                        // Rotate wave generator towards wave propagation direction
+                        shape.transform.rotation = Quaternion.Euler(0f, ocean.waves.TravelToDirectionDegrees, 0f);
+                    }
 
-                if (_syncWaveHeight)
-                {
-                    shapeGerstner._weight = Mathf.Clamp(ocean.waves.significantWaveHeight * _waveWeightMultiplier, 0f, 10f);
+                    if (_syncWaveHeight && _weightField != null)
+                    {
+                        _weightField.SetValue(shape, Mathf.Clamp(ocean.waves.significantWaveHeight * _waveWeightMultiplier, 0f, 10f));
+                    }
                 }
             }
 
@@ -140,54 +175,6 @@ namespace Marus.Metocean
             {
                 _currentInputTransform.rotation = Quaternion.Euler(0f, ocean.current.direction, 0f);
             }
-#else
-            // Fallback via reflection when CREST_OCEAN scripting define is not yet defined
-            TryApplyViaReflection(ocean);
-#endif
         }
-
-#if !CREST_OCEAN
-        private void TryApplyViaReflection(OceanStateData ocean)
-        {
-            var oceanRendererType = Type.GetType("Crest.OceanRenderer, Crest") ??
-                                    Type.GetType("Crest.OceanRenderer, Crest.HDRP");
-            if (oceanRendererType == null) return;
-
-            var instanceProp = oceanRendererType.GetProperty("Instance", BindingFlags.Public | BindingFlags.Static);
-            var instance = instanceProp?.GetValue(null);
-            if (instance == null) return;
-
-            if (_syncSeaLevel)
-            {
-                var seaLevelProp = oceanRendererType.GetProperty("SeaLevel", BindingFlags.Public | BindingFlags.Instance);
-                seaLevelProp?.SetValue(instance, _baseSeaLevel + ocean.seaLevelOffset);
-            }
-
-            var shapeGerstnerType = Type.GetType("Crest.ShapeGerstnerBatched, Crest") ??
-                                    Type.GetType("Crest.ShapeGerstnerBatched, Crest.HDRP");
-            if (shapeGerstnerType != null && instance is Component comp)
-            {
-                var shape = comp.GetComponentInChildren(shapeGerstnerType);
-                if (shape != null)
-                {
-                    if (_syncWaveDirection)
-                    {
-                        shape.transform.rotation = Quaternion.Euler(0f, ocean.waves.TravelToDirectionDegrees, 0f);
-                    }
-
-                    if (_syncWaveHeight)
-                    {
-                        var weightField = shapeGerstnerType.GetField("_weight", BindingFlags.Public | BindingFlags.Instance);
-                        weightField?.SetValue(shape, Mathf.Clamp(ocean.waves.significantWaveHeight * _waveWeightMultiplier, 0f, 10f));
-                    }
-                }
-            }
-
-            if (_syncOceanCurrent && _currentInputTransform != null)
-            {
-                _currentInputTransform.rotation = Quaternion.Euler(0f, ocean.current.direction, 0f);
-            }
-        }
-#endif
     }
 }
