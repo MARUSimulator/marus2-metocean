@@ -28,16 +28,6 @@ namespace Marus.Metocean
         HeavyRain
     }
 
-    public enum CloudCondition
-    {
-        Custom,
-        Clear,
-        Sparse,
-        Cloudy,
-        Overcast,
-        Stormy
-    }
-
     /// <summary>
     /// Manual/Constant provider that exposes configurable metocean values in the Unity Inspector.
     /// Provides built-in presets and real-time tweaking during editor and play modes.
@@ -240,7 +230,9 @@ namespace Marus.Metocean
                 fogDensity: _fogDensity,
                 visibility: _visibility,
                 cloudCoverage: _cloudCoverage,
-                wind: _wind
+                wind: _wind,
+                cloudCondition: _cloudCondition,
+                conditionText: _cloudCondition.ToString()
             );
 
             NotifyDataUpdated(new MetoceanData(ocean, weather));

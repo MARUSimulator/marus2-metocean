@@ -122,7 +122,8 @@ namespace Marus.Metocean
             MetoceanDataFlags.AirTemperature |
             MetoceanDataFlags.RelativeHumidity |
             MetoceanDataFlags.AtmosphericPressure |
-            MetoceanDataFlags.Precipitation;
+            MetoceanDataFlags.Precipitation |
+            MetoceanDataFlags.CloudCoverage;
 
         /// <summary>
         /// Read-only snapshot of all parsed Weather Display telemetry.
@@ -184,22 +185,7 @@ namespace Marus.Metocean
             float barometer = ParseFloat(fields[6]);
             if (barometer < 100f) barometer = 1013.25f; // Fallback for invalid sensor reading
 
-            // 3. Rain & Precipitation (fields 7: daily rain mm, 10: current rain rate mm/hr)
-            float dailyRain = ParseFloat(fields[7]);
-            float rainRate = fields.Length > 10 ? ParseFloat(fields[10]) : 0f;
-
-            // Normalized rain intensity [0, 1]
-            float rainIntensity = 0f;
-            if (rainRate > 0.05f)
-            {
-                rainIntensity = Mathf.Clamp01(rainRate / Mathf.Max(1.0f, _maxRainRateMmHr));
-            }
-            else if (dailyRain > 0.1f && fields.Length > 48 && fields[48].IndexOf("rain", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                rainIntensity = 0.25f;
-            }
-
-            // 4. Station metadata & text
+            // 3. Station metadata & condition text
             string stationName = "Weather Station";
             if (fields.Length > 32)
             {
@@ -211,7 +197,34 @@ namespace Marus.Metocean
                 }
             }
 
-            string conditionText = fields.Length > 48 ? fields[48] : string.Empty;
+            // In Weather Display clientraw format:
+            // Field 48 is the weather icon code (0 = Sunny, 1 = Clear Night, 2 = Cloudy, 10 = Rain, etc.)
+            // Field 49 is the weather condition text string (e.g. "Sunny/Dry", "Mostly_Cloudy", "Rain")
+            string conditionText = string.Empty;
+            if (fields.Length > 49 && !string.IsNullOrWhiteSpace(fields[49]) && !int.TryParse(fields[49], out _))
+            {
+                conditionText = fields[49].Replace('_', ' ');
+            }
+            else if (fields.Length > 48 && !string.IsNullOrWhiteSpace(fields[48]))
+            {
+                conditionText = ResolveIconCondition(fields[48]);
+            }
+
+            // 4. Rain & Precipitation (fields 7: daily rain mm, 10: current rain rate mm/hr)
+            float dailyRain = ParseFloat(fields[7]);
+            float rainRate = fields.Length > 10 ? ParseFloat(fields[10]) : 0f;
+
+            // Normalized rain intensity [0, 1]
+            float rainIntensity = 0f;
+            if (rainRate > 0.05f)
+            {
+                rainIntensity = Mathf.Clamp01(rainRate / Mathf.Max(1.0f, _maxRainRateMmHr));
+            }
+            else if (dailyRain > 0.1f && !string.IsNullOrEmpty(conditionText) && conditionText.IndexOf("rain", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                rainIntensity = 0.25f;
+            }
+
             string updateTime = fields.Length > 74 ? fields[74] : string.Empty;
 
             // 5. Optional station GPS coordinates if available in extended fields (indices 150, 151)
@@ -246,8 +259,10 @@ namespace Marus.Metocean
                 weatherConditionText = conditionText
             };
 
-            // Construct new weather state, preserving fog and visibility from current cache, and estimating cloud coverage from station text
-            float cloudCoverage = !string.IsNullOrWhiteSpace(conditionText) ? EstimateCloudCoverage(conditionText) : _currentData.Weather.cloudCoverage;
+            // Construct new weather state, preserving fog and visibility from current cache, and estimating cloud condition from station text
+            var (cloudCoverage, cloudCondition) = !string.IsNullOrWhiteSpace(conditionText)
+                ? EstimateCloudCondition(conditionText)
+                : (_currentData.Weather.cloudCoverage, _currentData.Weather.cloudCondition);
 
             var weather = new WeatherStateData(
                 airTemperature: tempC,
@@ -257,24 +272,58 @@ namespace Marus.Metocean
                 fogDensity: _currentData.Weather.fogDensity,
                 visibility: _currentData.Weather.visibility,
                 cloudCoverage: cloudCoverage,
-                wind: wind
+                wind: wind,
+                cloudCondition: cloudCondition,
+                conditionText: conditionText
             );
 
             data = new MetoceanData(_currentData.Ocean, weather, DateTime.UtcNow);
             return true;
         }
 
-        private static float EstimateCloudCoverage(string condition)
+        private static (float coverage, CloudCondition condition) EstimateCloudCondition(string condition)
         {
-            if (string.IsNullOrWhiteSpace(condition)) return 0.25f;
+            if (string.IsNullOrWhiteSpace(condition)) return (0.25f, CloudCondition.Sparse);
             string lower = condition.ToLowerInvariant();
-            if (lower.Contains("clear") || lower.Contains("sunny") || lower.Contains("fine")) return 0.0f;
-            if (lower.Contains("few") || lower.Contains("sparse") || lower.Contains("scattered")) return 0.2f;
-            if (lower.Contains("partly")) return 0.45f;
-            if (lower.Contains("cloudy") || lower.Contains("broken")) return 0.65f;
-            if (lower.Contains("overcast") || lower.Contains("fog") || lower.Contains("mist")) return 0.85f;
-            if (lower.Contains("rain") || lower.Contains("storm") || lower.Contains("shower")) return 0.95f;
-            return 0.3f;
+            if (lower.Contains("clear") || lower.Contains("sunny") || lower.Contains("fine"))
+                return (0.0f, CloudCondition.Clear);
+            if (lower.Contains("few") || lower.Contains("sparse") || lower.Contains("scattered"))
+                return (0.2f, CloudCondition.Sparse);
+            if (lower.Contains("partly"))
+                return (0.45f, CloudCondition.Cloudy);
+            if (lower.Contains("cloudy") || lower.Contains("broken"))
+                return (0.65f, CloudCondition.Cloudy);
+            if (lower.Contains("overcast") || lower.Contains("fog") || lower.Contains("mist"))
+                return (0.85f, CloudCondition.Overcast);
+            if (lower.Contains("rain") || lower.Contains("storm") || lower.Contains("shower"))
+                return (0.95f, CloudCondition.Stormy);
+            return (0.3f, CloudCondition.Sparse);
+        }
+
+        private static string ResolveIconCondition(string iconField)
+        {
+            if (int.TryParse(iconField, out int icon))
+            {
+                switch (icon)
+                {
+                    case 0: return "Sunny";
+                    case 1: return "Clear Night";
+                    case 2: return "Cloudy";
+                    case 3: return "Mostly Cloudy Night";
+                    case 4: return "Mostly Cloudy";
+                    case 5: return "Partly Cloudy Night";
+                    case 6: return "Partly Cloudy";
+                    case 7: return "Fog";
+                    case 8: return "Haze";
+                    case 9: return "Heavy Rain";
+                    case 10: return "Rain";
+                    case 11: return "Few Showers";
+                    case 12: return "Thunderstorm";
+                    case 13: return "Snow";
+                    default: return string.Empty;
+                }
+            }
+            return iconField;
         }
 
         private static float ParseFloat(string value)

@@ -134,6 +134,8 @@ namespace Marus.Metocean
             if ((flagsToApply & MetoceanDataFlags.CloudCoverage) != 0)
             {
                 weather.cloudCoverage = incoming.Weather.cloudCoverage;
+                weather.cloudCondition = incoming.Weather.cloudCondition;
+                weather.conditionText = incoming.Weather.conditionText;
             }
 
             // Location: adopt incoming location if it has non-zero coordinates

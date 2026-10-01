@@ -956,10 +956,16 @@ namespace Marus.Metocean
 
             float coverage = weather.cloudCoverage;
             float rain = weather.rainIntensity;
+            CloudCondition condition = weather.cloudCondition;
 
-            if (coverage < 0.05f)
+            // Determine if skies are clear
+            bool isClear = condition == CloudCondition.Clear || (condition == CloudCondition.Custom && coverage < 0.05f);
+
+            if (isClear)
             {
-                _activeCloudPresetName = "Clear";
+                _activeCloudPresetName = !string.IsNullOrEmpty(weather.conditionText)
+                    ? $"Clear ({weather.conditionText})"
+                    : "Clear";
 
                 // Turn off clouds for clear sky
                 SetVolumeParameterValue(_cachedVolumetricClouds, "enable", false);
@@ -981,26 +987,55 @@ namespace Marus.Metocean
                 SetVolumeParameterValue(_cachedVolumetricClouds, "cloudControl", 0);
 
                 int targetPreset;
-                if (rain >= 0.35f)
+                string presetName;
+
+                // Priority 1: Direct CloudCondition enum if specified by provider
+                switch (condition)
                 {
-                    targetPreset = 3; // Stormy
-                    _activeCloudPresetName = "Stormy";
+                    case CloudCondition.Sparse:
+                        targetPreset = 0; // Sparse
+                        presetName = "Sparse";
+                        break;
+                    case CloudCondition.Cloudy:
+                        targetPreset = 1; // Cloudy
+                        presetName = "Cloudy";
+                        break;
+                    case CloudCondition.Overcast:
+                        targetPreset = 2; // Overcast
+                        presetName = "Overcast";
+                        break;
+                    case CloudCondition.Stormy:
+                        targetPreset = 3; // Stormy
+                        presetName = "Stormy";
+                        break;
+                    default:
+                        // Priority 2: Fallback to coverage & rain metrics
+                        if (rain >= 0.35f)
+                        {
+                            targetPreset = 3; // Stormy
+                            presetName = "Stormy";
+                        }
+                        else if (coverage >= 0.70f)
+                        {
+                            targetPreset = 2; // Overcast
+                            presetName = "Overcast";
+                        }
+                        else if (coverage >= 0.35f)
+                        {
+                            targetPreset = 1; // Cloudy
+                            presetName = "Cloudy";
+                        }
+                        else
+                        {
+                            targetPreset = 0; // Sparse
+                            presetName = "Sparse";
+                        }
+                        break;
                 }
-                else if (coverage >= 0.70f)
-                {
-                    targetPreset = 2; // Overcast
-                    _activeCloudPresetName = "Overcast";
-                }
-                else if (coverage >= 0.35f)
-                {
-                    targetPreset = 1; // Cloudy
-                    _activeCloudPresetName = "Cloudy";
-                }
-                else
-                {
-                    targetPreset = 0; // Sparse
-                    _activeCloudPresetName = "Sparse";
-                }
+
+                _activeCloudPresetName = !string.IsNullOrEmpty(weather.conditionText)
+                    ? $"{presetName} ({weather.conditionText})"
+                    : presetName;
 
                 // Apply preset via property
                 var cloudType = _cachedVolumetricClouds.GetType();

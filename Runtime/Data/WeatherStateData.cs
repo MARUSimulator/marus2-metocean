@@ -18,6 +18,19 @@ using UnityEngine;
 namespace Marus.Metocean
 {
     /// <summary>
+    /// Discrete cloud conditions mapping to sky presets.
+    /// </summary>
+    public enum CloudCondition
+    {
+        Custom = 0,
+        Clear = 1,
+        Sparse = 2,
+        Cloudy = 3,
+        Overcast = 4,
+        Stormy = 5
+    }
+
+    /// <summary>
     /// Holds atmospheric and meteorological states.
     /// </summary>
     [Serializable]
@@ -50,6 +63,12 @@ namespace Marus.Metocean
         [Range(0f, 1f)]
         public float cloudCoverage;
 
+        [Tooltip("Standard cloud condition category (Clear, Sparse, Cloudy, Overcast, Stormy, Custom).")]
+        public CloudCondition cloudCondition;
+
+        [Tooltip("Observed or parsed weather condition string (e.g. 'Sunny/Dry', 'Mostly Cloudy', 'Rain').")]
+        public string conditionText;
+
         [Tooltip("Surface wind conditions.")]
         public WindData wind;
 
@@ -61,7 +80,9 @@ namespace Marus.Metocean
             float fogDensity = 0.0f,
             float visibility = 10000.0f,
             float cloudCoverage = 0.2f,
-            WindData wind = default)
+            WindData wind = default,
+            CloudCondition cloudCondition = CloudCondition.Custom,
+            string conditionText = "")
         {
             this.airTemperature = airTemperature;
             this.atmosphericPressure = Mathf.Max(800f, atmosphericPressure);
@@ -71,6 +92,8 @@ namespace Marus.Metocean
             this.visibility = Mathf.Max(10f, visibility);
             this.cloudCoverage = Mathf.Clamp01(cloudCoverage);
             this.wind = wind;
+            this.cloudCondition = cloudCondition;
+            this.conditionText = conditionText ?? string.Empty;
         }
 
         public bool IsRaining => rainIntensity > 0.02f;
@@ -96,7 +119,9 @@ namespace Marus.Metocean
             fogDensity: 0.0f,
             visibility: 10000.0f,
             cloudCoverage: 0.2f,
-            wind: WindData.Default
+            wind: WindData.Default,
+            cloudCondition: CloudCondition.Sparse,
+            conditionText: "Fair"
         );
 
         public bool Equals(WeatherStateData other)
@@ -108,12 +133,14 @@ namespace Marus.Metocean
                    Mathf.Approximately(fogDensity, other.fogDensity) &&
                    Mathf.Approximately(visibility, other.visibility) &&
                    Mathf.Approximately(cloudCoverage, other.cloudCoverage) &&
+                   cloudCondition == other.cloudCondition &&
+                   string.Equals(conditionText, other.conditionText, StringComparison.Ordinal) &&
                    wind.Equals(other.wind);
         }
 
         public override bool Equals(object obj) => obj is WeatherStateData other && Equals(other);
 
-        public override int GetHashCode() => HashCode.Combine(airTemperature, atmosphericPressure, relativeHumidity, rainIntensity, fogDensity, visibility, cloudCoverage, wind);
+        public override int GetHashCode() => HashCode.Combine(airTemperature, atmosphericPressure, relativeHumidity, rainIntensity, fogDensity, visibility, HashCode.Combine(cloudCoverage, (int)cloudCondition, conditionText, wind));
     }
 }
 
