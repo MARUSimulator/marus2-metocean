@@ -110,17 +110,39 @@ namespace Marus.Metocean
         [Tooltip("Calculate and apply realistic Sun elevation and azimuth angles based on geographic coordinates and time of day.")]
         [SerializeField] private bool _syncSunAngle = true;
 
-        [Tooltip("Sunlight intensity when the Sun is high in a clear sky.")]
-        [SerializeField] private float _maxSunIntensity = 1.25f;
+        [Range(10f, 60f)]
+        [Tooltip("Sun elevation angle (degrees above horizon) at which full daylight intensity is reached. Prevents autumn/winter and morning/afternoon sun from being excessively dim.")]
+        [SerializeField] private float _fullDaylightAngle = 25.0f;
 
-        [Tooltip("Sunlight intensity when near the horizon (dawn / dusk).")]
-        [SerializeField] private float _horizonSunIntensity = 0.35f;
+        [Tooltip("Sunlight intensity when the Sun is high in a clear sky.")]
+        [SerializeField] private float _maxSunIntensity = 28.0f;
+
+        [Tooltip("Sunlight intensity when near the horizon (dawn / dusk golden hour).")]
+        [SerializeField] private float _horizonSunIntensity = 4.5f;
 
         [Tooltip("Sunlight intensity during fully overcast or rainy skies.")]
-        [SerializeField] private float _overcastSunIntensity = 0.25f;
+        [SerializeField] private float _overcastSunIntensity = 5.5f;
 
         [Tooltip("Sunlight/moonlight intensity when the Sun is below the horizon (night). Set > 0 to prevent pitch black scene at night.")]
         [SerializeField] private float _nightSunIntensity = 0.02f;
+
+        [Header("Sky Lighting (HDRP Sky)")]
+        [Tooltip("Synchronize HDRP Sky exposure and multiplier with sun position, time of day, and weather states.")]
+        [SerializeField] private bool _syncSkyLighting = true;
+
+        [Range(-2f, 5f)]
+        [Tooltip("Exposure boost (in EV) applied to the sky during clear daylight. Higher values make the sky lighter, crisper, and illuminate ambient shadows across the scene (typical 1.0 to 2.5 EV).")]
+        [SerializeField] private float _daySkyExposure = 1.8f;
+
+        [Tooltip("Sky exposure (in EV) during civil twilight (sun near or slightly below horizon).")]
+        [SerializeField] private float _twilightSkyExposure = 0.5f;
+
+        [Tooltip("Sky exposure (in EV) at night.")]
+        [SerializeField] private float _nightSkyExposure = -1.0f;
+
+        [Range(0.1f, 5f)]
+        [Tooltip("Direct intensity multiplier for the sky dome.")]
+        [SerializeField] private float _skyMultiplier = 1.5f;
 
         [Header("Moon & Night Lighting")]
         [Tooltip("Optional Directional Light representing the Moon in the scene.")]
@@ -160,6 +182,9 @@ namespace Marus.Metocean
         public string CalculatedSolarTime => _calculatedSolarTime;
         public string ActiveCloudPresetName => _activeCloudPresetName;
         public Vector2 CloudOffset => _accumulatedCloudOffset;
+        public float DaySkyExposure => _daySkyExposure;
+        public float SkyMultiplier => _skyMultiplier;
+        public float FullDaylightAngle => _fullDaylightAngle;
 
         protected override void Update()
         {
@@ -178,6 +203,10 @@ namespace Marus.Metocean
             {
                 UpdateClouds(_lastData.Weather);
             }
+            if (_syncFog)
+            {
+                UpdateFog(_lastData.Weather);
+            }
         }
 
         private void Reset()
@@ -187,6 +216,12 @@ namespace Marus.Metocean
             _customMonth = now.Month;
             _customDay = now.Day;
             _customTimeOfDayHours = (float)(now.Hour + now.Minute / 60.0);
+            _maxSunIntensity = 28.0f;
+            _horizonSunIntensity = 4.5f;
+            _overcastSunIntensity = 5.5f;
+            _fullDaylightAngle = 25.0f;
+            _daySkyExposure = 1.8f;
+            _skyMultiplier = 1.5f;
         }
 
         public override void OnMetoceanUpdated(MetoceanData data)
@@ -199,17 +234,8 @@ namespace Marus.Metocean
         {
             var weather = data.Weather;
 
-            // 1. Fog
-            if (_syncFog)
-            {
-                RenderSettings.fog = weather.fogDensity > 0.001f || weather.visibility < 5000f;
-                if (RenderSettings.fog)
-                {
-                    RenderSettings.fogMode = FogMode.ExponentialSquared;
-                    RenderSettings.fogColor = _fogColor;
-                    RenderSettings.fogDensity = weather.fogDensity * _maxFogDensity;
-                }
-            }
+            // 1. Fog (RenderSettings + HDRP Fog)
+            UpdateFog(weather);
 
             // 2. Rain Particles
             if (_syncRain && _rainParticleSystem != null)
@@ -237,7 +263,7 @@ namespace Marus.Metocean
                 _windZone.transform.rotation = Quaternion.Euler(0f, weather.wind.BlowToDirectionDegrees + northOffset, 0f);
             }
 
-            // 4. Sun & Moon (Celestial Bodies)
+            // 4. Sun & Moon & Sky (Celestial Bodies)
             UpdateCelestialBodies();
 
             // 5. Clouds (HDRP Volumetric Clouds)
@@ -258,6 +284,7 @@ namespace Marus.Metocean
 
             UpdateSun(utcTime, lat, lon);
             UpdateMoon(utcTime, lat, lon);
+            UpdateSky(_solarElevation);
         }
 
         private void UpdateSun(DateTime utcTime, double lat, double lon)
@@ -300,9 +327,9 @@ namespace Marus.Metocean
             float intensity;
             if (elevation > 0f)
             {
-                // Day: smooth atmospheric falloff curve (preserves natural afternoon illumination without premature darkening)
-                float sinEl = Mathf.Clamp01(Mathf.Sin(elevation * Mathf.Deg2Rad));
-                float heightFactor = Mathf.Sqrt(sinEl);
+                // Day: smooth atmospheric falloff curve (preserves natural daylight brilliance across autumn/winter and morning/afternoon)
+                float elevationRatio = Mathf.Clamp01(elevation / _fullDaylightAngle);
+                float heightFactor = Mathf.SmoothStep(0f, 1f, elevationRatio);
                 float clearSkyIntensity = Mathf.Lerp(_horizonSunIntensity, _maxSunIntensity, heightFactor);
 
                 // Cloud / rain attenuation
@@ -697,10 +724,12 @@ namespace Marus.Metocean
             return "Waning Crescent";
         }
 
-        #region HDRP Volumetric Clouds Synchronization
+        #region HDRP Environment (Clouds, Sky, Fog) Synchronization
 
         private object _cachedVolumetricClouds;
         private object _cachedVisualEnvironment;
+        private object _cachedSky;
+        private object _cachedFog;
         private UnityEngine.Object _cachedProfile;
 
         private object ResolveVolumeProfile()
@@ -771,6 +800,8 @@ namespace Marus.Metocean
             _cachedProfile = profile as UnityEngine.Object;
             _cachedVolumetricClouds = null;
             _cachedVisualEnvironment = null;
+            _cachedSky = null;
+            _cachedFog = null;
 
             IEnumerable list = null;
             var prop = profile.GetType().GetProperty("components");
@@ -795,12 +826,119 @@ namespace Marus.Metocean
                     {
                         _cachedVisualEnvironment = item;
                     }
+                    else if (typeName.EndsWith("Sky") || typeName.Contains("Sky"))
+                    {
+                        _cachedSky = item;
+                    }
+                    else if (typeName == "Fog")
+                    {
+                        _cachedFog = item;
+                    }
                 }
             }
 
             if (_cachedVolumetricClouds != null && _accumulatedCloudOffset == Vector2.zero)
             {
                 _accumulatedCloudOffset = GetVolumeVector2Parameter(_cachedVolumetricClouds, "cloudOffset");
+            }
+        }
+
+        private void UpdateSky(float elevation)
+        {
+            if (!_syncSkyLighting) return;
+
+            if (_cachedSky == null)
+            {
+                var prof = ResolveVolumeProfile();
+                ResolveComponents(prof);
+            }
+
+            if (_cachedSky == null) return;
+
+            float targetExposure;
+            float targetMultiplier = _skyMultiplier;
+
+            if (elevation > 0f)
+            {
+                // Day: smooth interpolation from twilight exposure at horizon to full day sky exposure
+                float elevationRatio = Mathf.Clamp01(elevation / _fullDaylightAngle);
+                float heightFactor = Mathf.SmoothStep(0f, 1f, elevationRatio);
+                targetExposure = Mathf.Lerp(_twilightSkyExposure, _daySkyExposure, heightFactor);
+
+                // Cloud / rain attenuation slightly dims the sky
+                float cloudDimming = Mathf.Clamp01(_lastData.Weather.cloudCoverage + _lastData.Weather.rainIntensity * 0.3f);
+                targetExposure = Mathf.Lerp(targetExposure, targetExposure - 0.75f, cloudDimming);
+                targetMultiplier = Mathf.Lerp(_skyMultiplier, _skyMultiplier * 0.75f, cloudDimming);
+            }
+            else if (elevation > -6f)
+            {
+                // Civil twilight: fade smoothly to night
+                float twilightFactor = (elevation + 6f) / 6f;
+                targetExposure = Mathf.Lerp(_nightSkyExposure, _twilightSkyExposure, twilightFactor);
+            }
+            else
+            {
+                // Night
+                targetExposure = _nightSkyExposure;
+            }
+
+            // Apply exposure and multiplier to Sky component
+            SetVolumeParameterValue(_cachedSky, "skyIntensityMode", 0); // Exposure mode
+            SetVolumeParameterValue(_cachedSky, "exposure", targetExposure);
+            SetVolumeParameterValue(_cachedSky, "multiplier", targetMultiplier);
+
+#if UNITY_EDITOR
+            if (!Application.isPlaying && _cachedProfile != null)
+            {
+                UnityEditor.EditorUtility.SetDirty(_cachedProfile);
+            }
+#endif
+        }
+
+        private void UpdateFog(WeatherStateData weather)
+        {
+            if (!_syncFog) return;
+
+            // 1. Built-in RenderSettings fallback (for non-HDRP)
+            RenderSettings.fog = weather.fogDensity > 0.001f || weather.visibility < 5000f;
+            if (RenderSettings.fog)
+            {
+                RenderSettings.fogMode = FogMode.ExponentialSquared;
+                RenderSettings.fogColor = _fogColor;
+                RenderSettings.fogDensity = weather.fogDensity * _maxFogDensity;
+            }
+
+            // 2. HDRP Volumetric Fog synchronization
+            if (_cachedFog == null)
+            {
+                var prof = ResolveVolumeProfile();
+                ResolveComponents(prof);
+            }
+
+            if (_cachedFog != null)
+            {
+                bool isFoggy = weather.fogDensity > 0.001f || weather.visibility < 5000f;
+                SetVolumeParameterValue(_cachedFog, "enabled", isFoggy);
+
+                if (isFoggy)
+                {
+                    // Koschmieder's law: meanFreePath ~ visibility / 3.0
+                    float meanFreePath = Mathf.Clamp(weather.visibility / 3.0f, 30f, 4000f);
+                    SetVolumeParameterValue(_cachedFog, "meanFreePath", meanFreePath);
+                    SetVolumeParameterValue(_cachedFog, "albedo", _fogColor);
+                }
+                else
+                {
+                    // In clear conditions, push meanFreePath far away so distant scenery and sky remain crisp
+                    SetVolumeParameterValue(_cachedFog, "meanFreePath", 15000f);
+                }
+
+#if UNITY_EDITOR
+                if (!Application.isPlaying && _cachedProfile != null)
+                {
+                    UnityEditor.EditorUtility.SetDirty(_cachedProfile);
+                }
+#endif
             }
         }
 
