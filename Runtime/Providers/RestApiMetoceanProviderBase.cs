@@ -152,6 +152,7 @@ namespace Marus.Metocean
             using (UnityWebRequest request = UnityWebRequest.Get(requestUrl))
             {
                 request.timeout = _timeoutSeconds;
+                CustomizeWebRequest(request);
                 yield return request.SendWebRequest();
 
                 if (request.result == UnityWebRequest.Result.Success)
@@ -198,6 +199,13 @@ namespace Marus.Metocean
         protected virtual string BuildRequestUrl()
         {
             return _apiUrl;
+        }
+
+        /// <summary>
+        /// Hook to configure request headers or settings before sending the web request.
+        /// </summary>
+        protected virtual void CustomizeWebRequest(UnityWebRequest request)
+        {
         }
 
         /// <summary>
