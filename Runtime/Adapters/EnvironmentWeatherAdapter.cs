@@ -66,6 +66,9 @@ namespace Marus.Metocean
         [Tooltip("Sync cloud coverage and presets (Clear, Sparse, Cloudy, Overcast, Stormy) with HDRP Volumetric Clouds.")]
         [SerializeField] private bool _syncClouds = true;
 
+        [Tooltip("Enable 2D background cloud layers (Visual Environment -> Background Clouds). Keep disabled to prevent 2D cloud layers from overriding or conflicting with Volumetric Clouds.")]
+        [SerializeField] private bool _enableBackgroundCloudLayers = false;
+
         [Tooltip("HDRP Volume GameObject or Component hosting the Sky/Global Volume with VolumetricClouds. If unassigned, automatically finds it in the scene.")]
         [SerializeField] private UnityEngine.Object _cloudVolume;
 
@@ -172,6 +175,12 @@ namespace Marus.Metocean
 
         private MetoceanData _lastData = MetoceanData.Default;
 
+        // Throttling and stabilization caches to prevent probe churning and lighting blinking
+        private float _lastCelestialUpdateTime = -999f;
+        private float _lastCustomTimeOfDayHours = -999f;
+        private float _lastAppliedSkyExposure = -999f;
+        private float _lastAppliedSkyMultiplier = -999f;
+
         public float SolarElevation => _solarElevation;
         public float SolarAzimuth => _solarAzimuth;
         public float MoonElevation => _moonElevation;
@@ -189,10 +198,22 @@ namespace Marus.Metocean
         protected override void Update()
         {
             base.Update();
-            UpdateCelestialBodies();
+
+            bool timeChanged = Mathf.Abs(_customTimeOfDayHours - _lastCustomTimeOfDayHours) > 0.001f;
+            bool shouldUpdateCelestial = !Application.isPlaying
+                || timeChanged
+                || (Time.time - _lastCelestialUpdateTime >= 1.0f);
+
+            if (shouldUpdateCelestial)
+            {
+                _lastCelestialUpdateTime = Time.time;
+                _lastCustomTimeOfDayHours = _customTimeOfDayHours;
+                UpdateCelestialBodies();
+            }
+
             if (_syncClouds && _windDrivenCloudDrift && Application.isPlaying)
             {
-                UpdateCloudDrift();
+                UpdateCloudDriftTelemetry();
             }
         }
 
@@ -320,7 +341,11 @@ namespace Marus.Metocean
                 // At night, if no separate moon light is active, angle light from above as fallback night light.
                 float lightElevation = elevation >= 0.5f ? elevation :
                     (elevation > -6f ? 0.5f : (_moonLight != null ? Mathf.Max(-10f, elevation) : 35f));
-                _sunLight.transform.rotation = Quaternion.Euler(lightElevation, azimuth - 180f + northOffset, 0f);
+                Quaternion targetRot = Quaternion.Euler(lightElevation, azimuth - 180f + northOffset, 0f);
+                if (Quaternion.Angle(_sunLight.transform.rotation, targetRot) > 0.02f)
+                {
+                    _sunLight.transform.rotation = targetRot;
+                }
             }
 
             // Calculate illumination intensity
@@ -348,7 +373,10 @@ namespace Marus.Metocean
                 intensity = _moonLight != null ? 0f : _nightSunIntensity;
             }
 
-            _sunLight.intensity = intensity;
+            if (Mathf.Abs(_sunLight.intensity - intensity) > 0.01f)
+            {
+                _sunLight.intensity = intensity;
+            }
         }
 
         private void UpdateMoon(DateTime utcTime, double lat, double lon)
@@ -375,11 +403,15 @@ namespace Marus.Metocean
             {
                 float northOffset = GeoOrigin.HasInstance ? GeoOrigin.Instance.TrueNorthOffset : 0f;
                 float lightElevation = Mathf.Max(0.5f, elevation);
-                _moonLight.transform.rotation = Quaternion.Euler(lightElevation, azimuth - 180f + northOffset, 0f);
+                Quaternion targetRot = Quaternion.Euler(lightElevation, azimuth - 180f + northOffset, 0f);
+                if (Quaternion.Angle(_moonLight.transform.rotation, targetRot) > 0.02f)
+                {
+                    _moonLight.transform.rotation = targetRot;
+                }
             }
 
             // Moonlight illumination:
-            // High when moon is high at night; scales with phase illumination; fades out during bright daytime (sun elevation > 0); dims with clouds.
+            // High when moon is high at night; scales with phase illumination; fades out completely during bright daytime (sun elevation > 0); dims with clouds.
             float intensity = 0f;
             if (elevation > 0f)
             {
@@ -387,16 +419,34 @@ namespace Marus.Metocean
                 float phaseFactor = _syncMoonPhase ? Mathf.Max(0.05f, illuminationFraction) : 1f;
                 float baseIntensity = _maxMoonIntensity * heightFactor * phaseFactor;
 
-                // Day / night crossfade: moonlight dims when sun is high
-                float sunSuppression = Mathf.Clamp01((_solarElevation - 0f) / 10f); // 0 at sunset/night, 1 when sun > 10°
-                intensity = Mathf.Lerp(baseIntensity, baseIntensity * 0.05f, sunSuppression);
+                // Day / night crossfade: moonlight fades smoothly to 0 when sun rises above horizon
+                // Strictly zero when sun is above 5° elevation to prevent dual-celestial exposure conflict in HDRP
+                if (_solarElevation >= 5.0f)
+                {
+                    intensity = 0f;
+                }
+                else if (_solarElevation > 0f)
+                {
+                    float sunSuppression = _solarElevation / 5.0f;
+                    intensity = Mathf.Lerp(baseIntensity, 0f, sunSuppression);
+                }
+                else
+                {
+                    intensity = baseIntensity;
+                }
 
                 // Cloud dimming
-                float cloudDimming = Mathf.Clamp01(_lastData.Weather.cloudCoverage + _lastData.Weather.rainIntensity * 0.3f);
-                intensity *= (1f - cloudDimming * 0.8f);
+                if (intensity > 0.0001f)
+                {
+                    float cloudDimming = Mathf.Clamp01(_lastData.Weather.cloudCoverage + _lastData.Weather.rainIntensity * 0.3f);
+                    intensity *= (1f - cloudDimming * 0.8f);
+                }
             }
 
-            _moonLight.intensity = intensity;
+            if (Mathf.Abs(_moonLight.intensity - intensity) > 0.005f)
+            {
+                _moonLight.intensity = intensity;
+            }
             _moonLight.color = _moonColor;
         }
 
@@ -408,10 +458,17 @@ namespace Marus.Metocean
         private static System.Reflection.FieldInfo s_hdMoonPhaseField;
         private static System.Reflection.FieldInfo s_hdSunIntensityField;
         private static System.Reflection.FieldInfo s_hdSunColorField;
+        private static Light s_lastConfiguredMoonLight;
+        private static float s_lastAppliedMoonPhase = -999f;
 
         private static void EnsureHdMoonSettings(Light moonLight, bool syncPhase, float phaseProgress)
         {
             if (moonLight == null) return;
+            if (moonLight == s_lastConfiguredMoonLight && Mathf.Abs(s_lastAppliedMoonPhase - phaseProgress) < 0.005f)
+            {
+                return;
+            }
+
             var comp = moonLight.GetComponent("HDAdditionalLightData");
             if (comp == null) return;
 
@@ -486,6 +543,9 @@ namespace Marus.Metocean
                     s_hdDistanceField.SetValue(comp, 384400000f);
                 }
             }
+
+            s_lastConfiguredMoonLight = moonLight;
+            s_lastAppliedMoonPhase = phaseProgress;
         }
 
         private DateTime ResolveCurrentTime()
@@ -882,10 +942,19 @@ namespace Marus.Metocean
                 targetExposure = _nightSkyExposure;
             }
 
-            // Apply exposure and multiplier to Sky component
-            SetVolumeParameterValue(_cachedSky, "skyIntensityMode", 0); // Exposure mode
-            SetVolumeParameterValue(_cachedSky, "exposure", targetExposure);
-            SetVolumeParameterValue(_cachedSky, "multiplier", targetMultiplier);
+            // Apply exposure and multiplier to Sky component only when changed by threshold
+            if (Mathf.Abs(targetExposure - _lastAppliedSkyExposure) > 0.02f)
+            {
+                SetVolumeParameterValue(_cachedSky, "skyIntensityMode", 0); // Exposure mode
+                SetVolumeParameterValue(_cachedSky, "exposure", targetExposure);
+                _lastAppliedSkyExposure = targetExposure;
+            }
+
+            if (Mathf.Abs(targetMultiplier - _lastAppliedSkyMultiplier) > 0.01f)
+            {
+                SetVolumeParameterValue(_cachedSky, "multiplier", targetMultiplier);
+                _lastAppliedSkyMultiplier = targetMultiplier;
+            }
 
 #if UNITY_EDITOR
             if (!Application.isPlaying && _cachedProfile != null)
@@ -946,7 +1015,7 @@ namespace Marus.Metocean
         {
             if (!_syncClouds) return;
 
-            if (_cachedVolumetricClouds == null || _cachedVisualEnvironment == null)
+            if (_cachedVolumetricClouds == null)
             {
                 var prof = ResolveVolumeProfile();
                 ResolveComponents(prof);
@@ -969,19 +1038,11 @@ namespace Marus.Metocean
 
                 // Turn off clouds for clear sky
                 SetVolumeParameterValue(_cachedVolumetricClouds, "enable", false);
-                if (_cachedVisualEnvironment != null)
-                {
-                    SetVolumeParameterValue(_cachedVisualEnvironment, "cloudType", 0);
-                }
             }
             else
             {
                 // Enable clouds
                 SetVolumeParameterValue(_cachedVolumetricClouds, "enable", true);
-                if (_cachedVisualEnvironment != null)
-                {
-                    SetVolumeParameterValue(_cachedVisualEnvironment, "cloudType", 1);
-                }
 
                 // Ensure cloudControl is Simple (0)
                 SetVolumeParameterValue(_cachedVolumetricClouds, "cloudControl", 0);
@@ -1065,6 +1126,33 @@ namespace Marus.Metocean
                 SetVolumeParameterValue(_cachedVolumetricClouds, "cloudOffset", _accumulatedCloudOffset);
             }
 
+            // Sync or disable Background Clouds in Visual Environment
+            if (_cachedVisualEnvironment != null)
+            {
+                if (_enableBackgroundCloudLayers)
+                {
+                    SetVolumeParameterValue(_cachedVisualEnvironment, "cloudType", isClear ? 0 : 1, true);
+                }
+                else
+                {
+                    // Ensure Visual Environment background cloud layers remain disabled (cloudType = 0 / None)
+                    SetVolumeParameterValue(_cachedVisualEnvironment, "cloudType", 0, true);
+                }
+
+                // Synchronize wind speed and orientation to VisualEnvironment so HDRP volumetric clouds drift smoothly on GPU
+                if (_windDrivenCloudDrift)
+                {
+                    float windSpeedKmH = weather.wind.speed * 3.6f;
+                    float blowToAngle = weather.wind.BlowToDirectionDegrees;
+                    float northOffset = GeoOrigin.HasInstance ? GeoOrigin.Instance.TrueNorthOffset : 0f;
+                    float windOrientation = (blowToAngle + northOffset) % 360f;
+                    if (windOrientation < 0f) windOrientation += 360f;
+
+                    SetVolumeParameterValue(_cachedVisualEnvironment, "windSpeed", windSpeedKmH, true);
+                    SetVolumeParameterValue(_cachedVisualEnvironment, "windOrientation", windOrientation, true);
+                }
+            }
+
 #if UNITY_EDITOR
             if (!Application.isPlaying && _cachedProfile != null)
             {
@@ -1073,15 +1161,8 @@ namespace Marus.Metocean
 #endif
         }
 
-        private void UpdateCloudDrift()
+        private void UpdateCloudDriftTelemetry()
         {
-            if (_cachedVolumetricClouds == null)
-            {
-                var prof = ResolveVolumeProfile();
-                ResolveComponents(prof);
-            }
-            if (_cachedVolumetricClouds == null) return;
-
             float speed = _lastData.Weather.wind.speed;
             if (speed <= 0.001f) return;
 
@@ -1092,27 +1173,29 @@ namespace Marus.Metocean
             float rad = totalAngle * Mathf.Deg2Rad;
             Vector2 driftDir = new Vector2(Mathf.Sin(rad), Mathf.Cos(rad));
 
-            // Subtract offset to advance texture coordinates in the direction the wind is blowing towards
+            // Accumulate offset in memory for telemetry / inspector monitoring without modifying CPU volume parameters every frame
             _accumulatedCloudOffset -= driftDir * (speed * _cloudWindSpeedMultiplier * Time.deltaTime);
 
             if (_accumulatedCloudOffset.x > 1000f) _accumulatedCloudOffset.x -= 2000f;
             if (_accumulatedCloudOffset.x < -1000f) _accumulatedCloudOffset.x += 2000f;
             if (_accumulatedCloudOffset.y > 1000f) _accumulatedCloudOffset.y -= 2000f;
             if (_accumulatedCloudOffset.y < -1000f) _accumulatedCloudOffset.y += 2000f;
-
-            SetVolumeParameterValue(_cachedVolumetricClouds, "cloudOffset", _accumulatedCloudOffset);
         }
 
         private static void SetVolumeParameterValue(object volumeComponent, string memberName, object value, bool overrideState = true)
         {
-            if (volumeComponent == null) return;
+            if (volumeComponent == null || value == null) return;
             var type = volumeComponent.GetType();
 
             // Direct property (e.g. cloudPreset)
             var prop = type.GetProperty(memberName, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (prop != null && prop.CanWrite && prop.PropertyType.IsAssignableFrom(value.GetType()))
             {
-                prop.SetValue(volumeComponent, value);
+                object currentPropVal = prop.CanRead ? prop.GetValue(volumeComponent) : null;
+                if (!ValuesAreEqual(currentPropVal, value))
+                {
+                    prop.SetValue(volumeComponent, value);
+                }
                 return;
             }
 
@@ -1132,20 +1215,35 @@ namespace Marus.Metocean
 
             var paramType = paramObj.GetType();
 
-            // Set overrideState
+            // Check current overrideState
             var overrideProp = paramType.GetProperty("overrideState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var overrideField = paramType.GetField("m_OverrideState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            bool currentOverride = false;
+            if (overrideProp != null) currentOverride = (bool)overrideProp.GetValue(paramObj);
+            else if (overrideField != null) currentOverride = (bool)overrideField.GetValue(paramObj);
+
+            // Check current value
+            var valProp = paramType.GetProperty("value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            var valField = paramType.GetField("m_Value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            object currentVal = valProp != null ? valProp.GetValue(paramObj) : (valField != null ? valField.GetValue(paramObj) : null);
+
+            // Guard: if overrideState and value are already identical, do not mutate parameter
+            if (currentOverride == overrideState && ValuesAreEqual(currentVal, value))
+            {
+                return;
+            }
+
+            // Set overrideState
             if (overrideProp != null && overrideProp.CanWrite)
             {
                 overrideProp.SetValue(paramObj, overrideState);
             }
-            else
+            else if (overrideField != null)
             {
-                var overrideField = paramType.GetField("m_OverrideState", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (overrideField != null) overrideField.SetValue(paramObj, overrideState);
+                overrideField.SetValue(paramObj, overrideState);
             }
 
             // Set value
-            var valProp = paramType.GetProperty("value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
             if (valProp != null && valProp.CanWrite)
             {
                 if (valProp.PropertyType.IsAssignableFrom(value.GetType()))
@@ -1161,25 +1259,59 @@ namespace Marus.Metocean
                     valProp.SetValue(paramObj, Convert.ChangeType(value, valProp.PropertyType));
                 }
             }
-            else
+            else if (valField != null)
             {
-                var valField = paramType.GetField("m_Value", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                if (valField != null)
+                if (valField.FieldType.IsAssignableFrom(value.GetType()))
                 {
-                    if (valField.FieldType.IsAssignableFrom(value.GetType()))
-                    {
-                        valField.SetValue(paramObj, value);
-                    }
-                    else if (valField.FieldType.IsEnum && value is int intVal)
-                    {
-                        valField.SetValue(paramObj, Enum.ToObject(valField.FieldType, intVal));
-                    }
-                    else
-                    {
-                        valField.SetValue(paramObj, Convert.ChangeType(value, valField.FieldType));
-                    }
+                    valField.SetValue(paramObj, value);
+                }
+                else if (valField.FieldType.IsEnum && value is int intVal)
+                {
+                    valField.SetValue(paramObj, Enum.ToObject(valField.FieldType, intVal));
+                }
+                else
+                {
+                    valField.SetValue(paramObj, Convert.ChangeType(value, valField.FieldType));
                 }
             }
+        }
+
+        private static bool ValuesAreEqual(object a, object b)
+        {
+            if (a == null && b == null) return true;
+            if (a == null || b == null) return false;
+
+            if (a is float fa && b is float fb)
+                return Mathf.Abs(fa - fb) < 0.0001f;
+
+            if (a is float fa2 && (b is int || b is double))
+                return Mathf.Abs(fa2 - Convert.ToSingle(b)) < 0.0001f;
+
+            if (b is float fb2 && (a is int || a is double))
+                return Mathf.Abs(Convert.ToSingle(a) - fb2) < 0.0001f;
+
+            if (a is int ia && b is int ib)
+                return ia == ib;
+
+            if (a is bool ba && b is bool bb)
+                return ba == bb;
+
+            if (a is Vector2 v2a && b is Vector2 v2b)
+                return Vector2.Distance(v2a, v2b) < 0.0001f;
+
+            if (a is Vector3 v3a && b is Vector3 v3b)
+                return Vector3.Distance(v3a, v3b) < 0.0001f;
+
+            if (a is Color ca && b is Color cb)
+                return Mathf.Abs(ca.r - cb.r) < 0.001f &&
+                       Mathf.Abs(ca.g - cb.g) < 0.001f &&
+                       Mathf.Abs(ca.b - cb.b) < 0.001f &&
+                       Mathf.Abs(ca.a - cb.a) < 0.001f;
+
+            if (a.GetType().IsEnum || b.GetType().IsEnum)
+                return Convert.ToInt64(a) == Convert.ToInt64(b);
+
+            return Equals(a, b);
         }
 
         private static Vector2 GetVolumeVector2Parameter(object volumeComponent, string memberName)
